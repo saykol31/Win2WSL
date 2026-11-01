@@ -134,7 +134,15 @@ while ($true) {
         }
 
         # --- vigilante del portapapeles ---
-        $current = Read-Clip
+        # Diagnóstico de parpadeo: si existe nowatch.flag en
+        # %USERPROFILE%\Win2WSL, el vigilante local no sondea
+        # (la recepción sigue viva).
+        # Silencio permanente (v2.2): el vigilante local solo
+        # trabaja si existe watch.flag en %USERPROFILE%\Win2WSL.
+        $flagPath = Join-Path $env:USERPROFILE "Win2WSL\watch.flag"
+        $watchEnabled = Test-Path $flagPath
+        $current = $null
+        if ($watchEnabled) { $current = Read-Clip }
         if ($null -ne $current -and $current -ne $script:LastText) {
             if ([DateTime]::UtcNow -lt $script:SuppressUntil) {
                 $script:LastText = $current  # eco: adoptar en silencio

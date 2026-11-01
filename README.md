@@ -8,7 +8,11 @@ it, so pasting in WSL keeps giving you the previous text).
 The bridge is two small scripts that talk over a local TCP
 socket, plus one command — `win2wsl` — that runs both sides
 in the background and controls them. No third-party software,
-no services, nothing leaves your machine.
+no services, nothing leaves your machine. One honest warning
+up front: on WSLg the active sync has a side effect (see
+"Silent by default" below), so since v2.2 the bridge ships
+silent — read that section before wondering why it moves
+nothing on its own.
 
 - Windows side: pure PowerShell (built into Windows) — no
   Python or extra installs needed on Windows.
@@ -94,6 +98,30 @@ Useful places:
 - WSL client log: `~/.win2wsl/client.log`
 - Windows server log: `%USERPROFILE%\Win2WSL\bridge.log`
 - Windows error log: `%USERPROFILE%\Win2WSL\bridge.err.log`
+
+## Silent by default (v2.2)
+
+Field testing found a side effect: while the WSL watcher
+polls the clipboard *contents*, WSLg windows flicker
+whenever the selection's owner is WSLg's own Windows-backed
+proxy — that is, right after you copy something in Windows.
+Every content read forces a fetch through the Windows
+channel, several times a second, and the compositor (and
+the clipboard itself) end up in a fight.
+
+So the watchers ship **off**. In the default silent mode
+both halves stay connected and answer to `win2wsl`, but
+they do not poll or move any text; WSLg's native clipboard
+sync does the carrying, and it does it without the fight.
+Each side's receiving path and the shutdown channel stay
+live.
+
+If you prefer the bridge's own active sync, enable the
+watcher on either side with a flag file:
+
+- WSL: `touch ~/.win2wsl/watch.flag`, then `win2wsl restart`
+- Windows: create `%USERPROFILE%\Win2WSL\watch.flag`
+  (it is read on every loop — takes effect immediately)
 
 ## Manual mode (for debugging)
 

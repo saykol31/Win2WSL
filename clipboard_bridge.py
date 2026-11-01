@@ -202,6 +202,15 @@ def clipboard_watcher(send_fn):
     send_fn confirma. send_fn(obj) -> bool."""
     global last_text, last_id
 
+    # Silencio permanente (v2.2): el vigilante queda apagado
+    # por defecto. Sondear el contenido cuando el dueño de la
+    # selección es el proxy de WSLg provoca el parpadeo de las
+    # ventanas (diagnóstico 2026-10-31). Solo se enciende si
+    # existe la bandera watch.flag; la recepción sigue viva.
+    if not os.path.exists(os.path.expanduser("~/.win2wsl/watch.flag")):
+        print("Vigilante local en silencio (sin watch.flag).")
+        return
+
     while True:
         time.sleep(POLL_INTERVAL)
         current = read_clipboard()
