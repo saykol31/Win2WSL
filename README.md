@@ -1,173 +1,132 @@
-# Clipboard Bridge for WSL
+# Win2WSL Clipboard Bridge
 
-Bidirectional text clipboard synchronization between Windows and WSL (WSLg).
+Bidirectional **text** clipboard sync between Windows and WSL2,
+for when the built-in WSLg clipboard stops updating (a known
+WSLg quirk: the first copy syncs, later copies never replace
+it, so pasting in WSL keeps giving you the previous text).
 
-## The problem
+The bridge is two small scripts that talk over a local TCP
+socket, plus one command — `win2wsl` — that runs both sides
+in the background and controls them. No third-party software,
+no services, nothing leaves your machine.
 
-The WSLg clipboard bridge is unreliable: the first copy from a Linux GUI app
-reaches the Windows clipboard, but later copies often don't replace it — you
-paste and get the *previous* text. The bug lives in the seam between the
-Wayland compositor (Weston), the RDP clipboard channel, and the Windows
-clipboard, and it has been reported for years.
-
-This tool adds a small, verified channel of its own next to the broken one:
-two watchers, one on each system, that forward every clipboard change to the
-other side over a private TCP connection, with freshness checks so stale
-content is never served.
-
-## How it works
-
-- The Windows side is a PowerShell server (no Python and no third-party
-  software needed on Windows). It listens on port 45831.
-- The WSL side is a Python 3 client. It connects to the Windows host
-  (it tries the default gateway first, then 127.0.0.1).
-- Both sides poll their local clipboard every 200–250 ms. When the text
-  changes, it is sent to the other side as a JSON line carrying a UUID.
-- Every change is identified by its UUID: the receiver remembers the last
-  applied change and never re-applies or bounces it back. A short anti-echo
-  window after applying a remote change prevents feedback loops.
-- "No text" (an image, a file, a busy clipboard, a read error) is **not**
-  the same as empty text. Non-text content is never transmitted and never
-  clears the other side's clipboard.
-- Both ends require a shared token. The Windows side creates it on first
-  run in `%USERPROFILE%\.clipbridge_token`; the WSL side finds it
-  automatically through `/mnt/c/Users/<user>/.clipbridge_token`. Without
-  the token, the port neither serves clipboard data nor accepts text —
-  the clipboard is not exposed to the LAN.
-- One known cosmetic behavior: Windows normalizes line endings its own
-  way, so a text arriving from WSL may be sent back **once** in its
-  Windows flavor. Both sides then settle on identical content. It is a
-  single normalization bounce, not a loop.
-
-Text only, by design. Images and files are not synchronized.
+- Windows side: pure PowerShell (built into Windows) — no
+  Python or extra installs needed on Windows.
+- WSL side: Python 3 + `wl-clipboard`.
+- Changes are verified before they are applied: a clipboard
+  that holds an image, a file or nothing is never mistaken
+  for empty text, so the other side is never erased by
+  accident. Every message carries a shared token, so other
+  devices on your LAN cannot read or inject clipboard text.
 
 ## Files
 
-| File | Side | Runs with |
+| File | Runs on | Purpose |
 |---|---|---|
-| `clipboard_bridge_windows.ps1` | Windows | PowerShell 5.1 (built into Windows) |
-| `clipboard_bridge.py` | WSL | Python 3 + `wl-clipboard` |
-
-`clipboard_bridge.py` also has a `windows` mode for Windows machines that
-do have Python (see "Alternative Windows side" below).
+| `win2wsl` | WSL | The command: starts, stops and inspects both sides |
+| `clipboard_bridge.py` | WSL | The WSL half of the bridge |
+| `clipboard_bridge_windows.ps1` | Windows | The Windows half (listens on TCP 45831) |
 
 ## Requirements
 
-- Windows 10 or 11 with WSL2 and WSLg.
-- PowerShell 5.1 (already on Windows — nothing to install).
-- In WSL: Python 3 and the `wl-clipboard` package (step 1 below).
-
-## Installation, step by step
-
-### Step 0 — Put the files in place
-
-- `clipboard_bridge_windows.ps1` → a folder on Windows (e.g. Downloads).
-- `clipboard_bridge.py` → your WSL home or any WSL folder.
-
-### Step 1 — One-time dependency in WSL
+- Windows 10/11 with WSL2 (Debian/Ubuntu) and PowerShell 5.1
+  (built into Windows).
+- In WSL: Python 3 and the `wl-clipboard` package:
 
 ```bash
-sudo apt install -y wl-clipboard
+sudo apt install wl-clipboard
 ```
 
-### Step 2 — Start the Windows side FIRST
+## Install
 
-Open PowerShell and run:
+1. Put the three files in one folder inside WSL, for example
+   `~/Home/Win2WSL`, and go there:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File $HOME\Downloads\clipboard_bridge_windows.ps1
-```
+   ```bash
+   mkdir -p ~/Home/Win2WSL
+   cd ~/Home/Win2WSL
+   ```
 
-(Adjust the path if you placed the file elsewhere.)
+2. Make the command executable and put it on your PATH with
+   a symbolic link (these folders and the link are created
+   by hand, once):
 
-On the first run it creates the token file and prints it. If Windows
-Firewall asks about PowerShell, allow it on **Private networks only**.
+   ```bash
+   chmod +x win2wsl
+   mkdir -p ~/.local/bin
+   ln -s ~/Home/Win2WSL/win2wsl ~/.local/bin/win2wsl
+   ```
 
-Expected output:
+   Open a new terminal so `~/.local/bin` is on your PATH
+   (or run `~/Home/Win2WSL/win2wsl` directly the first time).
 
-```
-Windows escuchando en el puerto 45831
-Esperando a WSL...
-```
+3. Start the bridge:
 
-### Step 3 — Start the WSL side
+   ```bash
+   win2wsl start
+   ```
 
-In your WSL terminal, from the folder where you put the script:
+   The first start copies the Windows half into
+   `%USERPROFILE%\Win2WSL` on the Windows side and launches
+   it hidden. If Windows Firewall asks, allow PowerShell on
+   the **Private** network only. A shared token is created
+   automatically at `%USERPROFILE%\.clipbridge_token`; both
+   sides find it on their own.
+
+## Usage
 
 ```bash
-python3 clipboard_bridge.py wsl
+win2wsl start     # start both sides in the background
+win2wsl stop      # stop both sides
+win2wsl restart   # stop, then start again
+win2wsl status    # is each side alive?
+win2wsl logs      # last lines of both logs
+win2wsl           # (no arguments) same as status
 ```
 
-Expected output:
+Stopping is done through the bridge itself: `win2wsl stop`
+sends an authenticated shutdown message over the same
+channel, so the hidden Windows server closes itself — no
+console to hunt down and no process to kill by hand.
 
-```
-Conectando a Windows: 172.x.x.x 45831
-Conectado a Windows.
-```
+Useful places:
 
-The Windows console answers with `WSL autenticado.`
+- WSL client log: `~/.win2wsl/client.log`
+- Windows server log: `%USERPROFILE%\Win2WSL\bridge.log`
+- Windows error log: `%USERPROFILE%\Win2WSL\bridge.err.log`
 
-### Step 4 — Use it
+## Manual mode (for debugging)
 
-Just copy and paste normally on both systems. The bridge runs in the
-foreground on purpose: both consoles print every synchronization
-(`Portapapeles actualizado desde...` / `Cambio local enviado.`), so you
-can watch it work while you trust it. A silent background mode can be
-added later.
+Both halves can still be run in the foreground, with their
+output on screen — handy while setting things up:
 
-Quick smoke tests:
+1. Windows, in PowerShell:
 
-```bash
-# Windows -> WSL: copy any text in Windows, then in WSL:
-wl-paste
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\clipboard_bridge_windows.ps1
+   ```
 
-# WSL -> Windows:
-echo "hello from WSL" | wl-copy
-# then press Ctrl+V in any Windows window
-```
+2. WSL, in a terminal:
 
-### Stopping
+   ```bash
+   python3 clipboard_bridge.py wsl
+   ```
 
-Close either console (or Ctrl+C). Start again in the same order:
-Windows first, then WSL.
+Leave both running. Ctrl+C closes whichever one you are
+looking at. Do not mix modes: close the foreground consoles
+before `win2wsl start`, because the port cannot be shared.
 
-## Troubleshooting
+## Notes
 
-| Symptom | Cause and fix |
-|---|---|
-| `wl-paste` / `wl-copy`: command not found | Step 1 was skipped: `sudo apt install -y wl-clipboard` |
-| WSL prints "No encontré el token" | The Windows side has never run. Start it once (Step 2) so it creates the token, or copy the token into `~/.clipbridge_token` in WSL. |
-| WSL keeps retrying the connection | Windows side not running, or the firewall blocked PowerShell. Start Windows first; allow Private networks only. |
-| "Address already in use" / port busy | A bridge instance is already running. Close the old console. |
-| Images or copied files don't sync | By design: text only. Non-text never overwrites the other side. |
-| A text bounces back once | Windows line-ending normalization (see "How it works"). It settles immediately. |
+- Text only, in both directions.
+- Windows may re-send a copied text once with its CRLF line
+  endings; both sides recognize it as the same content and
+  settle. It is not a loop.
+- The bridge listens on your LAN interface so WSL can reach
+  it; the token is what keeps the clipboard private. Treat
+  `%USERPROFILE%\.clipbridge_token` like a password.
 
-## Security notes
+## License
 
-- The shared token travels in every message and is required both to
-  receive the clipboard stream and to inject text. Keep
-  `.clipbridge_token` private, like a password.
-- The server listens on all interfaces so WSL can reach it through the
-  gateway address. Keep the firewall permission on Private networks
-  only, and treat the token as the real lock.
-
-## Alternative Windows side (Python)
-
-If the Windows machine already has Python 3:
-
-```bat
-pip install pyperclip
-python clipboard_bridge.py windows
-```
-
-Same protocol, same token, same port — the WSL side doesn't know or
-care which Windows implementation is running.
-
-## Design note
-
-The bridge follows a staged-transfer design, the way hardware moves a
-wide word over a narrow bus: stage the data, hold it steady, verify it
-is the fresh value, then deliver. Announcements are treated as hints,
-never as proof — freshness is proven by the change UUID, not by the
-notification channel, because the notification channel is exactly what
-is broken in WSLg.
+GPL-3.0 — see `LICENSE`. Free to use, study and share; if
+you distribute a modified version, it stays free too.

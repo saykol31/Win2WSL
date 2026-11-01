@@ -1,0 +1,291 @@
+#!/usr/bin/env bash
+#
+# win2wsl — gobierno del Clipboard Bridge en segundo plano.
+#
+#   win2wsl start     arranca el servidor Windows (oculto) y el cliente WSL
+#   win2wsl stop      detiene ambos lados
+#   win2wsl restart   reinicia ambos lados
+#   win2wsl status    estado de ambos lados (sin argumentos = status)
+#   win2wsl logs      últimas líneas de los dos registros
+#
+# Los dos scripts del puente (clipboard_bridge.py y
+# clipboard_bridge_windows.ps1) deben vivir junto a este
+# archivo. El lado Windows se instala solo en
+# %USERPROFILE%\Win2WSL la primera vez que se arranca.
+#
+# El apagado del servidor viaja por el propio canal del
+# puente (mensaje shutdown con el token compartido): no
+# hay que tocar la consola de Windows para detenerlo.
+
+set -u
+
+PORT=45831
+SELF="$(readlink -f "$0")"
+ASSET_DIR="$(dirname "$SELF")"
+PY_BRIDGE="$ASSET_DIR/clipboard_bridge.py"
+PS_BRIDGE="$ASSET_DIR/clipboard_bridge_windows.ps1"
+
+# Si el comando se copió solo a otro lugar (p. ej. ~/.local/bin),
+# los scripts se buscan en la carpeta del proyecto.
+if [ ! -f "$PY_BRIDGE" ] && [ -f "$HOME/Home/Win2WSL/clipboard_bridge.py" ]; then
+    ASSET_DIR="$HOME/Home/Win2WSL"
+    PY_BRIDGE="$ASSET_DIR/clipboard_bridge.py"
+    PS_BRIDGE="$ASSET_DIR/clipboard_bridge_windows.ps1"
+fi
+
+STATE_DIR="$HOME/.win2wsl"
+PID_FILE="$STATE_DIR/client.pid"
+CLIENT_LOG="$STATE_DIR/client.log"
+mkdir -p "$STATE_DIR"
+
+# ---------------------------------------------------------------
+# Utilidades
+# ---------------------------------------------------------------
+
+gateway_ip() {
+    ip route show default 2>/dev/null | awk '{for (i=1; i<=NF; i++) if ($i=="via") {print $(i+1); exit}}'
+}
+
+port_open() {
+    # Con timeout: si el cortafuegos de Windows descarta el
+    # paquete en silencio, la conexión TCP puede colgarse
+    # minutos; 2 segundos bastan para un sí o un no.
+    timeout 2 bash -c "exec 3<>/dev/tcp/$1/$PORT" 2>/dev/null
+}
+
+# Primera dirección donde el servidor responde (gateway o localhost)
+server_ip() {
+    local ip
+    ip="$(gateway_ip)"
+    if [ -n "$ip" ] && port_open "$ip"; then
+        echo "$ip"
+        return 0
+    fi
+    if port_open "127.0.0.1"; then
+        echo "127.0.0.1"
+        return 0
+    fi
+    return 1
+}
+
+win_profile_wsl() {
+    local p
+    p="$(cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r\n')"
+    [ -n "$p" ] && wslpath -u "$p" 2>/dev/null
+}
+
+token_value() {
+    if [ -s "$HOME/.clipbridge_token" ]; then
+        head -n 1 "$HOME/.clipbridge_token" | tr -d '\r\n'
+        return 0
+    fi
+    local f
+    for f in /mnt/c/Users/*/.clipbridge_token; do
+        if [ -s "$f" ]; then
+            head -n 1 "$f" | tr -d '\r\n'
+            return 0
+        fi
+    done
+    return 1
+}
+
+client_pid() {
+    local pid=""
+    [ -f "$PID_FILE" ] && pid="$(cat "$PID_FILE" 2>/dev/null)"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        echo "$pid"
+        return 0
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------
+# Lado WSL (cliente Python)
+# ---------------------------------------------------------------
+
+start_client() {
+    local pid
+    if pid="$(client_pid)"; then
+        echo "WSL: el cliente ya vive (pid $pid)."
+        return 0
+    fi
+    setsid python3 -u "$PY_BRIDGE" wsl >>"$CLIENT_LOG" 2>&1 </dev/null &
+    sleep 1
+    pid="$(pgrep -f 'clipboard_bridge.py wsl' | tail -n 1)"
+    if [ -n "$pid" ]; then
+        echo "$pid" > "$PID_FILE"
+        echo "WSL: cliente en segundo plano (pid $pid). Log: $CLIENT_LOG"
+    else
+        echo "WSL: el cliente no arrancó. Revisa: win2wsl logs"
+        return 1
+    fi
+}
+
+stop_client() {
+    local pid
+    if pid="$(client_pid)"; then
+        kill "$pid" 2>/dev/null
+        sleep 1
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null
+        echo "WSL: cliente detenido."
+    else
+        echo "WSL: el cliente no estaba corriendo."
+    fi
+    rm -f "$PID_FILE"
+}
+
+# ---------------------------------------------------------------
+# Lado Windows (servidor PowerShell)
+# ---------------------------------------------------------------
+
+WIN_DIR_WSL=""
+
+resolve_win_dir() {
+    local home_wsl
+    home_wsl="$(win_profile_wsl)" || return 1
+    WIN_DIR_WSL="$home_wsl/Win2WSL"
+    return 0
+}
+
+install_windows_side() {
+    resolve_win_dir || { echo "Windows: no pude resolver tu perfil (%USERPROFILE%)."; return 1; }
+    mkdir -p "$WIN_DIR_WSL" || return 1
+    if ! cmp -s "$PS_BRIDGE" "$WIN_DIR_WSL/clipboard_bridge_windows.ps1" 2>/dev/null; then
+        cp "$PS_BRIDGE" "$WIN_DIR_WSL/clipboard_bridge_windows.ps1"
+        echo "Windows: puente instalado en %USERPROFILE%\\Win2WSL."
+    fi
+    return 0
+}
+
+start_windows() {
+    local ip
+    if ip="$(server_ip)"; then
+        echo "Windows: el servidor ya vive (responde en $ip)."
+        return 0
+    fi
+    install_windows_side || return 1
+
+    local ps_path log_path err_path
+    ps_path="$(wslpath -w "$WIN_DIR_WSL/clipboard_bridge_windows.ps1")"
+    log_path="$(wslpath -w "$WIN_DIR_WSL/bridge.log")"
+    err_path="$(wslpath -w "$WIN_DIR_WSL/bridge.err.log")"
+
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+        "Start-Process -WindowStyle Hidden -FilePath powershell -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"$ps_path\"' -RedirectStandardOutput \"$log_path\" -RedirectStandardError \"$err_path\""
+
+    local i
+    for i in $(seq 1 10); do
+        sleep 1
+        if ip="$(server_ip)"; then
+            echo "Windows: servidor en segundo plano (responde en $ip). Log: %USERPROFILE%\\Win2WSL\\bridge.log"
+            return 0
+        fi
+    done
+    echo "Windows: el servidor no respondió. Revisa el error con: win2wsl logs"
+    return 1
+}
+
+stop_windows() {
+    local ip token
+    if ! ip="$(server_ip)"; then
+        echo "Windows: el servidor no está corriendo."
+        return 0
+    fi
+    token="$(token_value)" || { echo "Windows: no encontré el token; no puedo apagarlo por el canal."; return 1; }
+
+    # Apagado por el propio canal autenticado del puente.
+    python3 - "$ip" "$token" <<'PYEOF'
+import json
+import socket
+import sys
+
+ip, token = sys.argv[1], sys.argv[2]
+try:
+    s = socket.create_connection((ip, 45831), timeout=4)
+    s.sendall(json.dumps({"type": "hello", "token": token}).encode() + b"\n")
+    s.sendall(json.dumps({"type": "shutdown", "token": token}).encode() + b"\n")
+    s.close()
+except OSError:
+    pass
+PYEOF
+
+    local i
+    for i in $(seq 1 5); do
+        sleep 1
+        if ! server_ip >/dev/null; then
+            echo "Windows: servidor detenido por el canal."
+            return 0
+        fi
+    done
+
+    # Respaldo: terminar el proceso por su línea de comandos.
+    echo "Windows: el canal no lo detuvo; terminando el proceso..."
+    powershell.exe -NoProfile -Command \
+        "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { \$_.CommandLine -like '*clipboard_bridge_windows*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }"
+    sleep 1
+    if server_ip >/dev/null; then
+        echo "Windows: sigue respondiendo; ciérralo a mano si hace falta."
+        return 1
+    fi
+    echo "Windows: servidor detenido."
+    return 0
+}
+
+# ---------------------------------------------------------------
+# Comandos
+# ---------------------------------------------------------------
+
+do_status() {
+    local pid ip
+    if pid="$(client_pid)"; then
+        echo "WSL:     cliente VIVO (pid $pid)"
+    else
+        echo "WSL:     cliente detenido"
+    fi
+    if ip="$(server_ip)"; then
+        echo "Windows: servidor VIVO (responde en $ip:$PORT)"
+    else
+        echo "Windows: servidor sin respuesta"
+    fi
+}
+
+do_logs() {
+    echo "===== WSL ($CLIENT_LOG) ====="
+    tail -n 25 "$CLIENT_LOG" 2>/dev/null || echo "(sin registro todavía)"
+    if resolve_win_dir; then
+        echo "===== Windows ($WIN_DIR_WSL/bridge.log) ====="
+        tail -n 25 "$WIN_DIR_WSL/bridge.log" 2>/dev/null || echo "(sin registro todavía)"
+        if [ -s "$WIN_DIR_WSL/bridge.err.log" ]; then
+            echo "===== Windows errores ====="
+            tail -n 25 "$WIN_DIR_WSL/bridge.err.log"
+        fi
+    fi
+}
+
+case "${1:-status}" in
+    start)
+        start_windows
+        start_client
+        ;;
+    stop)
+        stop_client
+        stop_windows
+        ;;
+    restart)
+        stop_client
+        stop_windows
+        sleep 1
+        start_windows
+        start_client
+        ;;
+    status)
+        do_status
+        ;;
+    logs)
+        do_logs
+        ;;
+    *)
+        echo "Uso: win2wsl [start|stop|restart|status|logs]"
+        exit 1
+        ;;
+esac

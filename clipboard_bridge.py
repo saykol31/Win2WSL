@@ -34,6 +34,11 @@ Correcciones respecto al borrador original:
  5. Un solo watcher por proceso (el del servidor difunde a
     todos los clientes autenticados); si un envío falla, el
     cambio no se da por sincronizado y se reintenta.
+
+Versión 2 (fondo): el comando `win2wsl` gobierna ambos
+lados. El servidor acepta además un mensaje de apagado
+{"type": "shutdown", "token": ...} por el mismo canal
+autenticado, para poder detenerse sin tocar su consola.
 """
 
 import glob
@@ -255,6 +260,12 @@ def receive_loop(sock, on_update, on_hello=None):
                 on_hello()
             elif kind == "update":
                 on_update(msg)
+            elif kind == "shutdown" and ROLE == "windows":
+                # Apagado remoto por el canal autenticado:
+                # lo usa el comando win2wsl para detener el
+                # servidor que vive en segundo plano.
+                print("Apagado remoto recibido.")
+                os._exit(0)
 
 
 # ----------------------------------------------------------------

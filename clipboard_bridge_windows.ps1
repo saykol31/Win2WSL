@@ -10,6 +10,11 @@
 # %USERPROFILE%\.clipbridge_token; el lado WSL lo encuentra solo
 # a traves de /mnt/c/Users/<usuario>/.clipbridge_token.
 #
+# Version 2 (fondo): la salida va con Write-Output para que
+# quede en el log al correr oculto, y acepta el mensaje de
+# apagado remoto {"type": "shutdown"} por el canal con token
+# (lo envia el comando win2wsl al detenerse).
+#
 # Mismas reglas que la version Python:
 #  - Sin token valido no se sirve ni se acepta texto.
 #  - "Sin texto" (imagen, archivo, portapapeles ocupado) no se
@@ -34,9 +39,9 @@ function Get-BridgeToken {
     }
     $token = [guid]::NewGuid().ToString("N")
     Set-Content -Path $path -Value $token -Encoding Ascii
-    Write-Host "Token creado en $path"
-    Write-Host "Token: $token"
-    Write-Host "El lado WSL lo lee solo desde tu perfil de Windows."
+    Write-Output "Token creado en $path"
+    Write-Output "Token: $token"
+    Write-Output "El lado WSL lo lee solo desde tu perfil de Windows."
     return $token
 }
 
@@ -67,7 +72,7 @@ function Apply-Remote($msg) {
     $script:LastText = $text
     $script:LastId = $msg.id
     $script:SuppressUntil = [DateTime]::UtcNow.AddSeconds(1)
-    Write-Host "Portapapeles actualizado desde WSL."
+    Write-Output "Portapapeles actualizado desde WSL."
 }
 
 # ---------------- Servidor ----------------
@@ -77,11 +82,11 @@ $script:LastText = Read-Clip
 $listener = New-Object System.Net.Sockets.TcpListener `
     ([System.Net.IPAddress]::Any, $PORT)
 $listener.Start()
-Write-Host "Windows escuchando en el puerto $PORT"
-Write-Host "Si el firewall pregunta, permite PowerShell solo en red privada."
+Write-Output "Windows escuchando en el puerto $PORT"
+Write-Output "Si el firewall pregunta, permite PowerShell solo en red privada."
 
 while ($true) {
-    Write-Host "Esperando a WSL..."
+    Write-Output "Esperando a WSL..."
     $client = $listener.AcceptTcpClient()
     $stream = $client.GetStream()
     $encoding = New-Object System.Text.UTF8Encoding($false)
@@ -90,7 +95,7 @@ while ($true) {
     $byteBuf = New-Object byte[] 4096
     $buffer = ""
     $authed = $false
-    Write-Host "Conexion entrante aceptada."
+    Write-Output "Conexion entrante aceptada."
 
     while ($client.Connected) {
         # --- mensajes entrantes ---
@@ -111,9 +116,14 @@ while ($true) {
             if ($msg.token -ne $TOKEN) { continue }
             if ($msg.type -eq "hello") {
                 $authed = $true
-                Write-Host "WSL autenticado."
+                Write-Output "WSL autenticado."
             } elseif ($msg.type -eq "update" -and $authed) {
                 Apply-Remote $msg
+            } elseif ($msg.type -eq "shutdown" -and $authed) {
+                Write-Output "Apagado remoto recibido."
+                $client.Close()
+                $listener.Stop()
+                exit 0
             }
         }
 
@@ -143,7 +153,7 @@ while ($true) {
                         $writer.WriteLine($json)
                         $script:LastText = $current
                         $script:LastId = $id
-                        Write-Host "Cambio local enviado."
+                        Write-Output "Cambio local enviado."
                     } catch {
                         break  # no se confirma el envio: se reintenta
                     }
@@ -154,6 +164,6 @@ while ($true) {
         Start-Sleep -Milliseconds $POLL_MS
     }
 
-    Write-Host "WSL desconectado."
+    Write-Output "WSL desconectado."
     $client.Close()
 }
