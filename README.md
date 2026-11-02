@@ -150,9 +150,39 @@ before `win2wsl start`, because the port cannot be shared.
 - Windows may re-send a copied text once with its CRLF line
   endings; both sides recognize it as the same content and
   settle. It is not a loop.
-- The bridge listens on your LAN interface so WSL can reach
-  it; the token is what keeps the clipboard private. Treat
+- Since v2.3 the bridge listens only on the WSL virtual
+  adapter when it exists, not on your LAN interface. Treat
   `%USERPROFILE%\.clipbridge_token` like a password.
+
+## Security
+
+Read this before running the bridge on a network you do
+not control.
+
+- **Token authentication.** Every message carries a shared
+  128-bit token, created on first run in
+  `%USERPROFILE%\.clipbridge_token`. Messages with a wrong
+  token are ignored: the port does not serve the clipboard
+  to strangers.
+- **Authenticated before served.** The server sends
+  clipboard updates only over a connection that has
+  already authenticated with the token. Merely
+  connecting receives nothing.
+- **No encryption.** Traffic is plain JSON over a local
+  TCP connection. On your own machine that channel never
+  leaves the box, but anyone able to capture it could read
+  clipboard text and learn the token.
+- **Listening interface (v2.3).** The Windows server binds
+  only to the WSL virtual adapter (`vEthernet (WSL)`) when
+  it exists, so the port is not offered to your LAN. If
+  that interface is not found, it falls back to all
+  interfaces and prints a warning — in that state keep
+  Windows Firewall enabled and never allow port 45831 on
+  a public network profile.
+- **Clipboard content is sensitive.** Passwords and keys
+  pass through clipboards. Anything that can write to
+  your clipboard can put text one paste away from a
+  terminal; treat such programs as trusted code.
 
 ## License
 

@@ -18,8 +18,10 @@ Windows a través de /mnt/c/Users/*/.clipbridge_token.
 Correcciones respecto al borrador original:
  1. CONEXIÓN: el cliente WSL prueba primero la IP del host
     (puerta de enlace) y después 127.0.0.1 (el reenvío de
-    localhost de WSL). El servidor escucha en 0.0.0.0 para
-    poder aceptar la ruta de la puerta de enlace.
+    localhost de WSL). Desde la v2.3 el servidor escucha
+    solo en la interfaz vEthernet (WSL) — que es esa misma
+    puerta de enlace — y no en todas las interfaces; solo
+    si la interfaz no aparece cae a 0.0.0.0, con aviso.
  2. AUTENTICACIÓN: cada mensaje lleva un token compartido.
     Sin token válido no se recibe el flujo ni se aceptan
     textos: el puerto no sirve el portapapeles a la LAN.

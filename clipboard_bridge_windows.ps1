@@ -20,6 +20,11 @@
 #  - "Sin texto" (imagen, archivo, portapapeles ocupado) no se
 #    transmite y nunca borra el portapapeles del otro lado.
 #  - Deduplicacion por UUID con ventana anti-eco de 1 segundo.
+#
+# v2.3 (endurecimiento): el listener se ata a la IP de la
+# interfaz vEthernet (WSL) cuando existe, en vez de a todas
+# las interfaces: el puerto deja de ser visible en la LAN.
+# Solo si esa interfaz no aparece cae a Any, con aviso.
 
 $PORT = 45831
 $MAX_MESSAGE = 1000000
@@ -79,8 +84,27 @@ function Apply-Remote($msg) {
 $TOKEN = Get-BridgeToken
 $script:LastText = Read-Clip
 
+# Endurecimiento v2.3: escuchar SOLO en la interfaz virtual
+# de WSL, que es la unica ruta que el cliente necesita (el
+# cliente conecta a la puerta de enlace, que es esta misma
+# IP). Si la interfaz no aparece, se cae a Any con aviso:
+# el puerto queda visible en la LAN y lo protege el token.
+$bindAddress = [System.Net.IPAddress]::Any
+$wslAdapter = Get-NetIPAddress -AddressFamily IPv4 `
+    -InterfaceAlias "vEthernet (WSL*" `
+    -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -notlike "169.254.*" } |
+    Select-Object -First 1
+if ($wslAdapter) {
+    $bindAddress = [System.Net.IPAddress]::Parse($wslAdapter.IPAddress)
+    Write-Output "Escuchando solo en la interfaz WSL: $($wslAdapter.IPAddress)"
+} else {
+    Write-Output "AVISO: no se encontro la interfaz vEthernet (WSL)."
+    Write-Output "El puerto $PORT quedara visible en la LAN; lo protege solo el token."
+}
+
 $listener = New-Object System.Net.Sockets.TcpListener `
-    ([System.Net.IPAddress]::Any, $PORT)
+    ($bindAddress, $PORT)
 $listener.Start()
 Write-Output "Windows escuchando en el puerto $PORT"
 Write-Output "Si el firewall pregunta, permite PowerShell solo en red privada."
@@ -143,7 +167,13 @@ while ($true) {
         $watchEnabled = Test-Path $flagPath
         $current = $null
         if ($watchEnabled) { $current = Read-Clip }
-        if ($null -ne $current -and $current -ne $script:LastText) {
+        # Solo se envia a una conexion AUTENTICADA: cada
+        # update lleva dentro el propio token, asi que un
+        # extrano conectado sin autenticar recibiria el
+        # portapapeles Y la llave para inyectar. (El lado
+        # Python ya protegia su recepcion con authed;
+        # esta era la puerta que faltaba.)
+        if ($authed -and $null -ne $current -and $current -ne $script:LastText) {
             if ([DateTime]::UtcNow -lt $script:SuppressUntil) {
                 $script:LastText = $current  # eco: adoptar en silencio
             } else {
