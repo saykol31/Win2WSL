@@ -70,7 +70,10 @@ server_ip() {
 
 win_profile_wsl() {
     local p
-    p="$(cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r\n')"
+    # cmd.exe puede imprimir antes su aviso de cwd UNC (al arrancar
+    # desde el filesystem de WSL): vale solo la ultima linea no
+    # vacia, que es la ruta del perfil.
+    p="$(cmd.exe /c "echo %USERPROFILE%" 2>/dev/null | tr -d '\r' | awk 'NF' | tail -n 1)"
     [ -n "$p" ] && wslpath -u "$p" 2>/dev/null
 }
 
